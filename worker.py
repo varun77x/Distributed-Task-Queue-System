@@ -15,4 +15,15 @@ while True:
         time.sleep(1)
         continue
     task = r.json()
-    process_task(task)
+    success = process_task(task)
+    # Send acknowledgment
+    ack_status = "done" if success else "failed"
+    ack_resp = requests.post(
+        f"{BROKER_URL}/ack",
+        json={"task_id": task["id"], "status": ack_status}
+    )
+
+    if ack_resp.ok:
+        print(f"Acknowledged task {task['id']} as {ack_status}")
+    else:
+        print(f"Failed to ack {task['id']}: {ack_resp.text}")

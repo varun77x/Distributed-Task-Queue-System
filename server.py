@@ -44,3 +44,23 @@ def get_task():
     task["status"] = "processing"
     r.hset("tasks", task["id"], json.dumps(task))  # Update status
     return jsonify(task)
+
+@app.post("/ack")
+def ack_task():
+    """Worker acknowledgment endpoint"""
+    data = request.json
+    task_id = data.get("task_id")
+    status = data.get("status", "done")
+
+    if not task_id:
+        return jsonify({"error": "Missing task_id"}), 400
+
+    task_data = r.hget("tasks", task_id)
+    if not task_data:
+        return jsonify({"error": "Task not found"}), 404
+
+    task = json.loads(task_data)
+    task["status"] = status
+    r.hset("tasks", task_id, json.dumps(task))
+
+    return jsonify({"status": "acknowledged", "task_id": task_id, "new_status": status})
