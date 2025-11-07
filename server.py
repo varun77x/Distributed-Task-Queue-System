@@ -26,9 +26,21 @@ def submit_task():
     r.hset("tasks", task["id"], json.dumps(task))
     return jsonify({"status": "queued", "task_id": task["id"]})
 
+@app.get("/status/<task_id>")
+def get_status(task_id):
+    data = r.hget("tasks", task_id)
+    if not data:
+        return jsonify({"error": "Task not found"}), 404
+    task = json.loads(data)
+    return jsonify({"id": task_id, "status": task["status"]})
+
 @app.get("/get")
 def get_task():
-    if task_queue.empty():
+    task_data = r.lpop(QUEUE_KEY)  # Get next task
+    if not task_data:
         return jsonify({"status": "empty"}), 204
-    task = task_queue.get()
+
+    task = json.loads(task_data)
+    task["status"] = "processing"
+    r.hset("tasks", task["id"], json.dumps(task))  # Update status
     return jsonify(task)
