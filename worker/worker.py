@@ -2,8 +2,13 @@ import requests
 import time
 import random
 import traceback
+import os
 
-BROKER_URL = "http://localhost:5000"
+# BROKER_URL = "http://localhost:5000"
+BROKER_URL = os.getenv("BROKER_URL", "http://localhost:5000")
+API_SECRET_TOKEN = os.getenv("API_SECRET_TOKEN")
+AUTH_HEADERS = {"X-API-Token": API_SECRET_TOKEN} if API_SECRET_TOKEN else {}
+
 
 def process_task(task):
     """Simulate processing with random success/failure."""
@@ -25,7 +30,7 @@ def process_task(task):
 def main_loop():
     while True:
         try:
-            r = requests.get(f"{BROKER_URL}/get", timeout=5)
+            r = requests.get(f"{BROKER_URL}/get", timeout=10, headers=AUTH_HEADERS)
             if r.status_code == 204:
                 time.sleep(1)
                 continue
@@ -36,13 +41,13 @@ def main_loop():
 
             task = r.json()
             success = process_task(task)
-
             ack_status = "done" if success else "failed"
+            
             try:
                 ack_resp = requests.post(
                     f"{BROKER_URL}/ack",
                     json={"task_id": task["id"], "status": ack_status},
-                    timeout=5
+                    headers=AUTH_HEADERS
                 )
                 if ack_resp.ok:
                     print(f"Acknowledged {task['id']} as {ack_status}")

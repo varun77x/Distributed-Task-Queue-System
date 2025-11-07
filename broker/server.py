@@ -5,6 +5,8 @@ import json
 import traceback
 import time
 import threading
+import os
+from functools import wraps
 
 app = Flask(__name__)
 
@@ -13,6 +15,18 @@ MAIN_QUEUE = "task_queue"
 DLQ = "dead_letter_queue"
 PROCESSING_HASH = "processing_tasks"
 VISIBILITY_TIMEOUT = 30  # seconds
+redis_host = os.getenv("REDIS_HOST", "localhost")
+API_SECRET_TOKEN = os.getenv("API_SECRET_TOKEN")
+
+# --- AUTHENTICATION DECORATOR ---
+def require_token(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get("X-API-Token")
+        if not token or token != API_SECRET_TOKEN:
+            return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated
 
 # --- REDIS CONNECTION ---
 try:
@@ -34,6 +48,7 @@ def safe_json_load(data):
 # --- API ENDPOINTS ---
 
 @app.post("/submit")
+@require_token
 def submit_task():
     try:
         data = request.json
@@ -58,6 +73,7 @@ def submit_task():
 
 
 @app.get("/get")
+@require_token
 def get_task():
     """Worker fetches the next available task."""
     try:
@@ -81,6 +97,7 @@ def get_task():
 
 
 @app.post("/ack")
+@require_token
 def ack_task():
     """Worker acknowledgment or retry with DLQ fallback."""
     try:
@@ -136,6 +153,7 @@ def ack_task():
 
 
 @app.get("/status/<task_id>")
+@require_token
 def get_status(task_id):
     try:
         data = r.hget("tasks", task_id)
@@ -151,6 +169,7 @@ def get_status(task_id):
 
 
 @app.get("/dlq")
+@require_token
 def view_dlq():
     """Return current contents of DLQ."""
     try:
@@ -163,6 +182,7 @@ def view_dlq():
 
 
 @app.post("/dlq/retry/<task_id>")
+@require_token
 def retry_from_dlq(task_id):
     """Move a task from DLQ back to main queue."""
     try:

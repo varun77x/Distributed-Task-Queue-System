@@ -1,0 +1,37 @@
+version: "3.9"
+
+services:
+
+  redis:
+    image: redis:7
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  broker:
+    build: ./broker
+    container_name: broker
+    ports:
+      - "5000:5000"
+    environment:
+      - REDIS_HOST=redis
+      - API_SECRET_TOKEN=your-very-secret-token  # Add this
+    depends_on:
+      - redis
+
+  worker:
+    build: ./worker
+    deploy:
+      replicas: 3
+    environment:
+      - BROKER_URL=http://broker:5000
+      - API_SECRET_TOKEN=your-very-secret-token  # Add this
+    depends_on:
+      - broker
+      - redis
+
+volumes:
+  redis_data:
+
