@@ -1,12 +1,12 @@
 import requests
 import time
+import random
 
 BROKER_URL = "http://localhost:5000/get"
 
 def process_task(task):
     print(f"Processing {task['id']} ({task['type']})")
-    # TODO : Simulate work here
-    time.sleep(2)
+    time.sleep(random.uniform(1, 3))  # Simulating work
     print(f"Completed {task['id']}")
 
 while True:

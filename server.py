@@ -1,10 +1,16 @@
 # This is the broker
 from flask import Flask, request, jsonify
+import redis
 from queue import Queue
 import uuid
+import json #using this because redis stores binary data
 
 app = Flask(__name__)
-task_queue = Queue()
+
+# Connect to Redis
+r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+
+QUEUE_KEY = "task_queue"
 
 @app.post("/submit")
 def submit_task():
@@ -14,7 +20,10 @@ def submit_task():
         "type": data["type"],
         "payload": data.get("payload", {})
     }
-    task_queue.put(task)
+    # Store task in Redis list (acts as queue)
+    r.rpush(QUEUE_KEY, json.dumps(task))
+    # Also store by ID for lookup
+    r.hset("tasks", task["id"], json.dumps(task))
     return jsonify({"status": "queued", "task_id": task["id"]})
 
 @app.get("/get")
