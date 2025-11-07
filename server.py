@@ -18,11 +18,13 @@ def submit_task():
     task = {
         "id": str(uuid.uuid4()),
         "type": data["type"],
-        "payload": data.get("payload", {})
+        "payload": data.get("payload", {}),
+        "status": "queued",
+        "retries": 0,
+        "max_retries": data.get("max_retries", 3)
     }
     # Store task in Redis list (acts as queue)
     r.rpush(QUEUE_KEY, json.dumps(task))
-    # Also store by ID for lookup
     r.hset("tasks", task["id"], json.dumps(task))
     return jsonify({"status": "queued", "task_id": task["id"]})
 
@@ -60,7 +62,29 @@ def ack_task():
         return jsonify({"error": "Task not found"}), 404
 
     task = json.loads(task_data)
-    task["status"] = status
-    r.hset("tasks", task_id, json.dumps(task))
-
-    return jsonify({"status": "acknowledged", "task_id": task_id, "new_status": status})
+    
+    if status == "done":
+        task["status"] = "done"
+        r.hset("tasks", task_id, json.dumps(task))
+        return jsonify({"status": "acknowledged", "task_id": task_id, "new_status": "done"})
+    
+    elif status == "failed":
+        task["retries"] += 1
+        if task["retries"] <= task["max_retries"]:
+            task["status"] = "retrying"
+            r.hset("tasks", task_id, json.dumps(task))
+            # requeue for retry
+            r.rpush(QUEUE_KEY, json.dumps(task))
+            return jsonify({
+                "status": "requeued",
+                "task_id": task_id,
+                "retries": task["retries"]
+            })
+        else:
+            task["status"] = "failed_permanently"
+            r.hset("tasks", task_id, json.dumps(task))
+            return jsonify({
+                "status": "failed_permanently",
+                "task_id": task_id,
+                "retries": task["retries"]
+            })
