@@ -3,10 +3,18 @@ import redis
 import uuid
 import json
 import traceback
+import time
+import threading
 
 app = Flask(__name__)
 
-# Redis connection (with reconnect attempts)
+# --- CONFIG ---
+MAIN_QUEUE = "task_queue"
+DLQ = "dead_letter_queue"
+PROCESSING_HASH = "processing_tasks"
+VISIBILITY_TIMEOUT = 30  # seconds
+
+# --- REDIS CONNECTION ---
 try:
     r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
     r.ping()
@@ -15,13 +23,15 @@ except Exception as e:
     print("❌ Redis connection failed:", e)
     r = None
 
-QUEUE_KEY = "task_queue"
 
 def safe_json_load(data):
     try:
         return json.loads(data)
     except Exception:
         return None
+
+
+# --- API ENDPOINTS ---
 
 @app.post("/submit")
 def submit_task():
@@ -39,13 +49,9 @@ def submit_task():
             "max_retries": data.get("max_retries", 3)
         }
 
-        r.rpush(QUEUE_KEY, json.dumps(task))
+        r.rpush(MAIN_QUEUE, json.dumps(task))
         r.hset("tasks", task["id"], json.dumps(task))
-
         return jsonify({"status": "queued", "task_id": task["id"]})
-
-    except redis.ConnectionError:
-        return jsonify({"error": "Redis connection failed"}), 500
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -53,8 +59,9 @@ def submit_task():
 
 @app.get("/get")
 def get_task():
+    """Worker fetches the next available task."""
     try:
-        task_data = r.lpop(QUEUE_KEY)
+        task_data = r.lpop(MAIN_QUEUE)
         if not task_data:
             return jsonify({"status": "empty"}), 204
 
@@ -64,10 +71,10 @@ def get_task():
 
         task["status"] = "processing"
         r.hset("tasks", task["id"], json.dumps(task))
-        return jsonify(task)
+        # Record processing timestamp
+        r.hset(PROCESSING_HASH, task["id"], str(time.time()))
 
-    except redis.ConnectionError:
-        return jsonify({"error": "Redis connection failed"}), 500
+        return jsonify(task)
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -75,7 +82,7 @@ def get_task():
 
 @app.post("/ack")
 def ack_task():
-    """Acknowledge task completion or retry"""
+    """Worker acknowledgment or retry with DLQ fallback."""
     try:
         data = request.json
         if not data or "task_id" not in data:
@@ -92,37 +99,37 @@ def ack_task():
         if not task:
             return jsonify({"error": "Corrupted task data"}), 500
 
-        # Handle different outcomes
+        # Remove from processing list
+        r.hdel(PROCESSING_HASH, task_id)
+
         if status == "done":
             task["status"] = "done"
             r.hset("tasks", task_id, json.dumps(task))
-            return jsonify({"status": "acknowledged", "task_id": task_id, "new_status": "done"})
+            return jsonify({"status": "acknowledged", "task_id": task_id})
 
         elif status == "failed":
             task["retries"] += 1
             if task["retries"] <= task["max_retries"]:
                 task["status"] = "retrying"
                 r.hset("tasks", task_id, json.dumps(task))
-                r.rpush(QUEUE_KEY, json.dumps(task))  # Requeue
+                r.rpush(MAIN_QUEUE, json.dumps(task))
                 return jsonify({
                     "status": "requeued",
                     "task_id": task_id,
                     "retries": task["retries"]
                 })
             else:
-                task["status"] = "failed_permanently"
+                task["status"] = "dead"
                 r.hset("tasks", task_id, json.dumps(task))
+                r.rpush(DLQ, json.dumps(task))
                 return jsonify({
-                    "status": "failed_permanently",
+                    "status": "moved_to_dlq",
                     "task_id": task_id,
                     "retries": task["retries"]
                 })
-
         else:
             return jsonify({"error": "Invalid status value"}), 400
 
-    except redis.ConnectionError:
-        return jsonify({"error": "Redis connection failed"}), 500
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -131,21 +138,89 @@ def ack_task():
 @app.get("/status/<task_id>")
 def get_status(task_id):
     try:
-        task_data = r.hget("tasks", task_id)
-        if not task_data:
+        data = r.hget("tasks", task_id)
+        if not data:
             return jsonify({"error": "Task not found"}), 404
-
-        task = safe_json_load(task_data)
+        task = safe_json_load(data)
         if not task:
             return jsonify({"error": "Corrupted task data"}), 500
-
         return jsonify(task)
-
-    except redis.ConnectionError:
-        return jsonify({"error": "Redis connection failed"}), 500
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.get("/dlq")
+def view_dlq():
+    """Return current contents of DLQ."""
+    try:
+        tasks = r.lrange(DLQ, 0, -1)
+        dlq_tasks = [safe_json_load(t) for t in tasks if safe_json_load(t)]
+        return jsonify({"dlq_size": len(dlq_tasks), "tasks": dlq_tasks})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.post("/dlq/retry/<task_id>")
+def retry_from_dlq(task_id):
+    """Move a task from DLQ back to main queue."""
+    try:
+        tasks = r.lrange(DLQ, 0, -1)
+        found = None
+
+        for t in tasks:
+            task = safe_json_load(t)
+            if task and task["id"] == task_id:
+                found = task
+                break
+
+        if not found:
+            return jsonify({"error": "Task not found in DLQ"}), 404
+
+        r.lrem(DLQ, 0, json.dumps(found))
+        found["retries"] = 0
+        found["status"] = "requeued_from_dlq"
+        r.hset("tasks", task_id, json.dumps(found))
+        r.rpush(MAIN_QUEUE, json.dumps(found))
+        return jsonify({"status": "requeued_from_dlq", "task_id": task_id})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# --- VISIBILITY TIMEOUT MONITOR ---
+def visibility_watcher():
+    """Background thread that requeues expired tasks."""
+    print(f"🕒 Visibility monitor started (timeout = {VISIBILITY_TIMEOUT}s)")
+    while True:
+        try:
+            all_processing = r.hgetall(PROCESSING_HASH)
+            now = time.time()
+
+            for task_id, ts in all_processing.items():
+                age = now - float(ts)
+                if age > VISIBILITY_TIMEOUT:
+                    task_data = r.hget("tasks", task_id)
+                    task = safe_json_load(task_data)
+                    if not task:
+                        continue
+
+                    print(f"⚠️ Task {task_id} exceeded visibility timeout. Requeuing...")
+                    task["status"] = "timeout_requeued"
+                    r.hset("tasks", task_id, json.dumps(task))
+                    r.rpush(MAIN_QUEUE, json.dumps(task))
+                    r.hdel(PROCESSING_HASH, task_id)
+
+            time.sleep(5)
+        except Exception as e:
+            print(f"⚠️ Visibility watcher error: {e}")
+            traceback.print_exc()
+            time.sleep(5)
+
+
+# Start background watcher thread
+threading.Thread(target=visibility_watcher, daemon=True).start()
 
 
 if __name__ == "__main__":
