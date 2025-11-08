@@ -30,11 +30,11 @@ def require_token(f):
 
 # --- REDIS CONNECTION ---
 try:
-    r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+    r = redis.Redis(host=redis_host, port=6379, db=0, decode_responses=True)
     r.ping()
-    print("✅ Connected to Redis")
+    print("Connected to Redis")
 except Exception as e:
-    print("❌ Redis connection failed:", e)
+    print("Redis connection failed:", e)
     r = None
 
 

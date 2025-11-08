@@ -43,6 +43,31 @@ def main_loop():
             success = process_task(task)
             ack_status = "done" if success else "failed"
             
+            ack_attempts = 0
+            acked = False
+            while ack_attempts < 3 and not acked:
+                try:
+                    ack_resp = requests.post(
+                        f"{BROKER_URL}/ack",
+                        json={"id": task['id'], "status": ack_status},
+                        headers=AUTH_HEADERS,
+                        timeout=5
+                    )
+                    if ack_resp.ok:
+                        print(f"✅ Successfully acknowledged task {task['id']} with status '{ack_status}'")
+                        acked = True
+                    else:
+                        print(f"⚠️ Failed to ack task {task['id']}. Status: {ack_resp.status_code}. Retrying...")
+                        ack_attempts += 1
+                        time.sleep(2) # Wait before retrying
+                except requests.exceptions.RequestException as e:
+                    print(f"⚠️ Network error while acknowledging task {task['id']}: {e}. Retrying...")
+                    ack_attempts += 1
+                    time.sleep(2) # Wait before retrying
+
+            if not acked:
+                print(f"❌ CRITICAL: Could not acknowledge task {task['id']} after multiple retries. The task may be processed again.")
+            
             try:
                 ack_resp = requests.post(
                     f"{BROKER_URL}/ack",
